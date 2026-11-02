@@ -1,0 +1,14 @@
+{
+  "name": "end-session",
+  "description": "end-session, a Claude Code skill",
+  "owner": {
+    "name": "Sebastian Patino-Lang"
+  },
+  "plugins": [
+    {
+      "name": "end-session",
+      "source": "./",
+      "description": "Close a Claude Code session cleanly and hand over to the next one with pointers instead of prose"
+    }
+  ]
+}

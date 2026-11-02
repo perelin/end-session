@@ -1,0 +1,8 @@
+{
+  "name": "end-session",
+  "version": "1.0.0",
+  "author": { "name": "Sebastian Patino-Lang" },
+  "description": "Close a Claude Code session cleanly: PRs and tickets reflect reality, merged branches and worktrees are pruned, recurring gotchas land somewhere durable, and the next session gets a short pointer-based handover",
+  "license": "MIT",
+  "repository": "https://github.com/perelin/end-session"
+}
