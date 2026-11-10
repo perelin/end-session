@@ -47,7 +47,8 @@ class SurveyTest(unittest.TestCase):
         self.prs_file = os.path.join(t, "prs.json")
         self.env["PATH"] = bindir + os.pathsep + os.environ["PATH"]
         self.env["FAKE_PRS"] = self.prs_file
-        self.env.pop("CLAUDE_CODE_SESSION_ID", None)
+        for var in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_JOB_DIR", "CLAUDE_CODE_SESSION_KIND"):
+            self.env.pop(var, None)
         self.prs = []
 
     def tearDown(self):
@@ -66,11 +67,12 @@ class SurveyTest(unittest.TestCase):
         self.prs.append({"number": n, "title": f"t{n}", "state": state, "headRefName": branch,
                          "headRefOid": oid, "url": f"https://x/{n}", "isDraft": False})
 
-    def survey(self, cwd=None):
+    def survey(self, cwd=None, bg=False):
         with open(self.prs_file, "w") as f:
             json.dump(self.prs, f)
+        env = dict(self.env, CLAUDE_JOB_DIR=os.path.dirname(self.repo)) if bg else self.env
         out = subprocess.run([sys.executable, SCRIPT, "--no-fetch", self.repo],
-                             cwd=cwd or self.repo, env=self.env,
+                             cwd=cwd or self.repo, env=env,
                              capture_output=True, text=True, check=True).stdout
         return {l.split()[1].rstrip(":"): l.split()[0]
                 for l in out.splitlines() if l.split()[:1] and l.split()[0] in
@@ -107,12 +109,87 @@ class SurveyTest(unittest.TestCase):
         self.pr("dropped", "CLOSED", oid, 5)
         self.assertEqual(self.survey()[0]["dropped"], "ASK")
 
-    def test_current_worktree_is_kept_and_closability_reported(self):
+    @staticmethod
+    def commands(out):
+        return [l.strip()[2:] for l in out.splitlines() if l.strip().startswith("$ ")]
+
+    def test_squash_merged_current_worktree_gets_detach_commands(self):
         wt, oid = self.branch("here", push=False)
         self.pr("here", "MERGED", oid, 6)
         result, out = self.survey(cwd=wt)
         self.assertEqual(result["here"], "KEEP")
-        self.assertIn("squash-merged via #6 – t6", out)
+        self.assertIn("closable with ctrl+x once the commands below ran", out)
+        self.assertIn("AUTO     commits on no remote, content merged via #6 – t6", out)
+        for cmd in self.commands(out):
+            subprocess.run(cmd.split(), check=True, capture_output=True)
+        self.assertEqual(sh(wt, "git", "rev-list", "HEAD", "--not", "--remotes"), "")
+        self.assertNotIn("here", sh(self.repo, "git", "branch", "--list", "here"))
+        self.assertIn(": closable with ctrl+x\n", self.survey(cwd=wt)[1])
+
+    def test_commit_after_merge_in_current_worktree_blocks(self):
+        wt, oid = self.branch("extra", push=False)
+        self.pr("extra", "MERGED", oid, 11)
+        sh(wt, "git", "commit", "-q", "--allow-empty", "-m", "after merge")
+        out = self.survey(cwd=wt)[1]
+        self.assertIn("BLOCKED", out)
+        self.assertIn("BLOCKER  commits on no remote; #11 – t11 is merged, but", out)
+        self.assertEqual(self.commands(out), [])
+
+    def test_unmerged_unpushed_current_worktree_blocks(self):
+        wt, _ = self.branch("wip2", push=False)
+        out = self.survey(cwd=wt)[1]
+        self.assertIn("BLOCKER  commits on no remote (unsaved work)", out)
+        self.assertEqual(self.commands(out), [])
+
+    def lock(self, wt, reason):
+        sh(self.repo, "git", "worktree", "lock", "--reason", reason, wt)
+
+    @staticmethod
+    def dead_pid():
+        p = subprocess.Popen(["true"])
+        p.wait()
+        return p.pid
+
+    def test_cc_lock_on_current_worktree_is_unlocked_last_in_background(self):
+        wt, oid = self.branch("locked")
+        self.pr("locked", "OPEN", oid, 12)
+        self.lock(wt, f"claude session locked (pid {os.getpid()} start Tue Nov 10 10:23:22 2026)")
+        self.assertIn(": closable with ctrl+x\n", self.survey(cwd=wt)[1])
+        out = self.survey(cwd=wt, bg=True)[1]
+        self.assertIn("LAST     Claude Code lock on this worktree", out)
+        self.assertEqual(self.commands(out), [f"git -C {wt} worktree unlock {wt}"])
+
+    def test_foreign_lock_on_current_worktree_blocks(self):
+        wt, oid = self.branch("held")
+        self.pr("held", "OPEN", oid, 13)
+        self.lock(wt, "backup in progress")
+        out = self.survey(cwd=wt, bg=True)[1]
+        self.assertIn("BLOCKER  locked by something other than Claude Code (backup in progress)", out)
+
+    def test_other_locked_worktree_is_never_auto_pruned(self):
+        wt, oid = self.branch("busy")
+        self.pr("busy", "MERGED", oid, 14)
+        self.lock(wt, f"claude session busy (pid {os.getpid()})")
+        self.assertEqual(self.survey()[0]["busy"], "KEEP")
+        sh(self.repo, "git", "worktree", "unlock", wt)
+        self.lock(wt, f"claude session busy (pid {self.dead_pid()})")
+        self.assertEqual(self.survey()[0]["busy"], "ASK")
+
+    def test_uninitialized_submodule_is_not_reported(self):
+        lib = os.path.join(os.path.dirname(self.repo), "lib.git")
+        sh(self.repo, "git", "init", "-q", "--bare", "-b", "main", lib)
+        seed = os.path.join(os.path.dirname(self.repo), "lib-seed")
+        sh(self.repo, "git", "clone", "-q", lib, seed)
+        sh(seed, "git", "commit", "-q", "--allow-empty", "-m", "lib init")
+        sh(seed, "git", "push", "-q", "origin", "HEAD:main")
+        sh(self.repo, "git", "-c", "protocol.file.allow=always", "submodule", "add", "-q", lib, "lib")
+        sh(self.repo, "git", "commit", "-q", "-m", "add lib")
+        sh(self.repo, "git", "push", "-q", "origin", "main")
+        wt, oid = self.branch("nosub", push=False)
+        self.pr("nosub", "MERGED", oid, 15)
+        out = self.survey(cwd=wt)[1]
+        self.assertNotIn("submodule lib", out)
+        self.assertIn("AUTO     commits on no remote, content merged via #15 – t15", out)
 
     def test_clean_pushed_current_worktree_is_closable(self):
         wt, oid = self.branch("clean")
