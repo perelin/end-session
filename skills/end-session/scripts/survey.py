@@ -3,14 +3,16 @@
 
 Prints, per repo: unsaved work, open PRs, every local branch and worktree
 classified as AUTO-PRUNE / ASK / KEEP, and whether the worktree this session
-runs in can be closed cleanly. It never deletes, commits or pushes; the only
-write is `git fetch --prune` (skip with --no-fetch).
+runs in can be closed cleanly, with the commands that make it closable. It
+never deletes, commits or pushes; the only write is `git fetch --prune` (skip
+with --no-fetch).
 
 Usage: survey.py [--no-fetch] [REPO ...]   (default: current directory)
 """
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -53,7 +55,29 @@ def worktrees(repo):
             cur["branch"] = line[7:].removeprefix("refs/heads/")
         elif line == "bare":
             cur["bare"] = True
+        elif line == "locked" or line.startswith("locked "):
+            cur["locked"] = line[7:]
     return out
+
+
+# Reason Claude Code writes with `git worktree lock` for a session's worktree.
+CC_LOCK = re.compile(r"^claude (?:agent|session) .+ \(pid (\d+)(?: start .+)?\)$")
+
+
+def lock_pid(reason):
+    """PID named by a Claude Code worktree lock, or None for any other lock."""
+    m = CC_LOCK.match(reason or "")
+    return int(m.group(1)) if m else None
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def prs_by_branch(repo):
@@ -76,7 +100,9 @@ def submodule_problems(wt):
     problems = []
     for line in git(wt, "submodule", "status", "--recursive").splitlines():
         flag, rest = line[:1], line[1:].split()
-        if len(rest) < 2:
+        # '-' = not initialized in this worktree: the directory is empty, and git
+        # run inside it would report the superproject's commits instead.
+        if len(rest) < 2 or flag == "-":
             continue
         sub = rest[1]
         if flag == "+":
@@ -90,10 +116,18 @@ def pr_label(pr):
     return f"#{pr['number']} – {pr['title']}"
 
 
-def classify(tip, wt, pr, here, main_wt=""):
-    """Apply the step-3 auto-prune predicate. Returns (bucket, reason)."""
+def classify(tip, wt, pr, here, main_wt="", lock=None):
+    """Apply the step-3 auto-prune predicate. Returns (bucket, reason).
+
+    `lock` is the worktree's lock reason ("" if locked without one), None if unlocked.
+    """
     if wt and real(wt) == main_wt:
         return "ASK", "checked out in the main checkout"
+    if wt and lock is not None and real(wt) != here:
+        pid = lock_pid(lock)
+        if pid is not None and alive(pid):
+            return "KEEP", f"worktree locked by a running Claude Code session (pid {pid})"
+        return "ASK", f"worktree locked ({lock or 'no reason given'})"
     if pr is None:
         return "ASK", "no PR"
     if pr["state"] == "OPEN":
@@ -113,23 +147,52 @@ def classify(tip, wt, pr, here, main_wt=""):
     return "AUTO-PRUNE", f"merged {pr_label(pr)}"
 
 
-def closability(wt, branch, prs):
-    blockers = []
-    if git(wt, "status", "--porcelain"):
+def closability(wt, branch, prs, base, lock, bg, is_main=False):
+    """Blockers that need a decision, and (tier, reason, commands) that clear the rest.
+
+    AUTO: run without asking, during step 3. LAST: run as the final tool call
+    before the handover. The main checkout never gets commands: closing a session
+    doesn't delete it, and detaching or deleting its branch is never automatic.
+    """
+    blockers, actions = [], []
+    dirty = bool(git(wt, "status", "--porcelain"))
+    if dirty:
         blockers.append("uncommitted or untracked changes")
-    blockers += submodule_problems(wt)
+    subs = submodule_problems(wt)
+    blockers += subs
     if git(wt, "rev-list", "HEAD", "--not", "--remotes"):
         pr = (prs or {}).get(branch)
-        if pr and pr["state"] == "MERGED":
-            blockers.append(
-                f"commits on no remote, content squash-merged via {pr_label(pr)}: "
-                "ctrl+x twice discards them")
+        target = f"origin/{base}" if base else ""
+        merged_as_is = (pr and pr["state"] == "MERGED"
+                        and git(wt, "rev-parse", "HEAD") == pr["headRefOid"])
+        if merged_as_is and not is_main and not dirty and not subs and target \
+                and git(wt, "rev-parse", "--verify", "--quiet", target):
+            # Squash merge: the branch's commits are on no remote, their content
+            # is in the default branch. Agent View would count them as unpushed.
+            cmds = [f"git -C {wt} switch --detach {target}"]
+            if branch:
+                cmds.append(f"git -C {wt} branch -D {branch}")
+            actions.append(("AUTO", f"commits on no remote, content merged via {pr_label(pr)}", cmds))
+        elif merged_as_is and is_main:
+            blockers.append(f"commits on no remote, content merged via {pr_label(pr)}; "
+                            "main checkout, so nothing is changed automatically")
+        elif pr and pr["state"] == "MERGED":
+            blockers.append(f"commits on no remote; {pr_label(pr)} is merged, but the local tip "
+                            "differs from the merged head or the worktree is not clean")
         else:
             blockers.append("commits on no remote (unsaved work)")
-    return blockers
+    if lock is not None:
+        if lock_pid(lock) is None:
+            blockers.append(f"locked by something other than Claude Code ({lock or 'no reason given'})")
+        elif bg and not is_main:
+            # Agent View kills the session, then checks the lock; while the process
+            # is still exiting it counts as live and the close is refused.
+            actions.append(("LAST", "Claude Code lock on this worktree",
+                            [f"git -C {wt} worktree unlock {wt}"]))
+    return blockers, actions
 
 
-def survey(repo, fetch, here):
+def survey(repo, fetch, here, bg=False):
     repo = git(repo, "rev-parse", "--show-toplevel") or repo
     print(f"## {repo}")
     if fetch:
@@ -143,6 +206,7 @@ def survey(repo, fetch, here):
     all_wts = worktrees(repo)
     main_wt = real(all_wts[0]["path"]) if all_wts else ""
     wts = {w.get("branch"): w["path"] for w in all_wts if w.get("branch")}
+    locks = {w.get("branch"): w.get("locked") for w in all_wts if w.get("branch")}
     rows = []
     for line in git(repo, "for-each-ref", "--format=%(refname:short) %(objectname)",
                     "refs/heads").splitlines():
@@ -154,7 +218,7 @@ def survey(repo, fetch, here):
         elif prs is None:
             bucket, reason = "ASK", "PR state unknown"
         else:
-            bucket, reason = classify(tip, wt, prs.get(branch), here, main_wt)
+            bucket, reason = classify(tip, wt, prs.get(branch), here, main_wt, locks.get(branch))
         extra = []
         if unpushed and unpushed != "0":
             extra.append(f"{unpushed} commit(s) on no remote")
@@ -175,11 +239,24 @@ def survey(repo, fetch, here):
             draft = " (draft)" if pr.get("isDraft") else ""
             print(f"OPEN PR    {pr_label(pr)}{draft} — {pr['url']}")
 
-    for w in worktrees(repo):
-        if real(w["path"]) == here:
-            blockers = closability(w["path"], w.get("branch"), prs)
-            verdict = "closable with ctrl+x" if not blockers else "; ".join(blockers)
-            print(f"THIS WORKTREE {w['path']}: {verdict}")
+    for w in all_wts:
+        if real(w["path"]) != here:
+            continue
+        blockers, actions = closability(w["path"], w.get("branch"), prs, base,
+                                        w.get("locked"), bg, real(w["path"]) == main_wt)
+        if blockers:
+            verdict = "BLOCKED, needs a decision (see below)"
+        elif actions:
+            verdict = "closable with ctrl+x once the commands below ran"
+        else:
+            verdict = "closable with ctrl+x"
+        print(f"THIS WORKTREE {w['path']}: {verdict}")
+        for b in blockers:
+            print(f"  BLOCKER  {b}")
+        for tier, reason, cmds in actions:
+            print(f"  {tier:8} {reason}")
+            for cmd in cmds:
+                print(f"    $ {cmd}")
     print()
 
 
@@ -205,7 +282,7 @@ def main():
 
     for repo in a.repos:
         try:
-            survey(os.path.abspath(os.path.expanduser(repo)), not a.no_fetch, here)
+            survey(os.path.abspath(os.path.expanduser(repo)), not a.no_fetch, here, bool(bg))
         except Exception as e:  # one broken repo must not hide the others
             print(f"## {repo}\nerror: {e}\n")
 
