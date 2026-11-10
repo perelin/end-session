@@ -24,7 +24,7 @@ You cannot remove the worktree the session is standing in. In a background sessi
 The survey's `THIS WORKTREE` line gives the verdict; the lines under it are `AUTO` / `LAST` commands to run and `BLOCKER`s to resolve. Agent View's checks, as of Claude Code 2.1.322:
 
 - **unpushed:** `git log HEAD --not --remotes` in the worktree is non-empty. It doesn't know about squash merges.
-- **live_lock:** the worktree's `git worktree lock` reason (`claude session <name> (pid N start …)`, written when the session entered the worktree) names a process that is alive and not among the job's own. Agent View kills the session first and then checks; the session's process is the child under its `bg-pty-host`, and while it is still exiting it counts as live. Unlocking from inside the session avoids that. If the session gets respawned after the unlock (e.g. the user sends another message), it locks the worktree again under its new pid; run the unlock again before closing.
+- **live_lock:** the worktree's `git worktree lock` reason (`claude session <name> (pid N start …)`, written when the session entered the worktree) names a process that is alive and not among the job's own. Agent View kills the session first and then checks; the session's process is the child under its `bg-pty-host`, and while it is still exiting it counts as live. Unlocking from inside the session avoids that: with no lock, the check passes. (Derived from the bundle and from transcripts where an unlock got past the check; a respawn after the unlock may lock the worktree again under the new pid, also only derived. If Agent View refuses with the lock message anyway, ask the session to run the unlock again.)
 
 Resolve them like this:
 

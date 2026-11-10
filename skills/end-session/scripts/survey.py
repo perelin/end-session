@@ -147,11 +147,12 @@ def classify(tip, wt, pr, here, main_wt="", lock=None):
     return "AUTO-PRUNE", f"merged {pr_label(pr)}"
 
 
-def closability(wt, branch, prs, base, lock, bg):
+def closability(wt, branch, prs, base, lock, bg, is_main=False):
     """Blockers that need a decision, and (tier, reason, commands) that clear the rest.
 
     AUTO: run without asking, during step 3. LAST: run as the final tool call
-    before the handover.
+    before the handover. The main checkout never gets commands: closing a session
+    doesn't delete it, and detaching or deleting its branch is never automatic.
     """
     blockers, actions = [], []
     dirty = bool(git(wt, "status", "--porcelain"))
@@ -164,7 +165,7 @@ def closability(wt, branch, prs, base, lock, bg):
         target = f"origin/{base}" if base else ""
         merged_as_is = (pr and pr["state"] == "MERGED"
                         and git(wt, "rev-parse", "HEAD") == pr["headRefOid"])
-        if merged_as_is and not dirty and not subs and target \
+        if merged_as_is and not is_main and not dirty and not subs and target \
                 and git(wt, "rev-parse", "--verify", "--quiet", target):
             # Squash merge: the branch's commits are on no remote, their content
             # is in the default branch. Agent View would count them as unpushed.
@@ -172,6 +173,9 @@ def closability(wt, branch, prs, base, lock, bg):
             if branch:
                 cmds.append(f"git -C {wt} branch -D {branch}")
             actions.append(("AUTO", f"commits on no remote, content merged via {pr_label(pr)}", cmds))
+        elif merged_as_is and is_main:
+            blockers.append(f"commits on no remote, content merged via {pr_label(pr)}; "
+                            "main checkout, so nothing is changed automatically")
         elif pr and pr["state"] == "MERGED":
             blockers.append(f"commits on no remote; {pr_label(pr)} is merged, but the local tip "
                             "differs from the merged head or the worktree is not clean")
@@ -180,7 +184,7 @@ def closability(wt, branch, prs, base, lock, bg):
     if lock is not None:
         if lock_pid(lock) is None:
             blockers.append(f"locked by something other than Claude Code ({lock or 'no reason given'})")
-        elif bg:
+        elif bg and not is_main:
             # Agent View kills the session, then checks the lock; while the process
             # is still exiting it counts as live and the close is refused.
             actions.append(("LAST", "Claude Code lock on this worktree",
@@ -239,7 +243,7 @@ def survey(repo, fetch, here, bg=False):
         if real(w["path"]) != here:
             continue
         blockers, actions = closability(w["path"], w.get("branch"), prs, base,
-                                        w.get("locked"), bg)
+                                        w.get("locked"), bg, real(w["path"]) == main_wt)
         if blockers:
             verdict = "BLOCKED, needs a decision (see below)"
         elif actions:

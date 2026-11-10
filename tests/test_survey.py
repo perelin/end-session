@@ -135,6 +135,14 @@ class SurveyTest(unittest.TestCase):
         self.assertIn("BLOCKER  commits on no remote; #11 – t11 is merged, but", out)
         self.assertEqual(self.commands(out), [])
 
+    def test_main_checkout_never_gets_detach_or_unlock_commands(self):
+        sh(self.repo, "git", "checkout", "-q", "-b", "mainwork")
+        sh(self.repo, "git", "commit", "-q", "--allow-empty", "-m", "local only")
+        self.pr("mainwork", "MERGED", sh(self.repo, "git", "rev-parse", "HEAD"), 16)
+        out = self.survey(bg=True)[1]
+        self.assertEqual(self.commands(out), [])
+        self.assertIn("BLOCKER  commits on no remote", out)
+
     def test_unmerged_unpushed_current_worktree_blocks(self):
         wt, _ = self.branch("wip2", push=False)
         out = self.survey(cwd=wt)[1]
