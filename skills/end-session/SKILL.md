@@ -9,7 +9,7 @@ Run the steps in order. Skip any that don't apply: not every session has a PR, a
 
 **Side-effect rule:** there are two tiers.
 
-- **Status updates that just reflect reality: do them, no confirmation needed.** Posting a Linear/project update, moving a ticket to match the work, marking a PR ready (when checks are green and the description is complete), and pushing this session's own commits on a branch that has an open PR. Also pruning everything the survey marks `AUTO-PRUNE` (step 3), and saving `reference`/`discovery` gotchas to auto-memory when they pass the step-4 filter. Show what you did right after; don't ask first. The answer to "should I post this?" / "should I prune this merged branch?" is always yes; stop asking.
+- **Status updates that just reflect reality: do them, no confirmation needed.** Posting a Linear/project update, moving a ticket to match the work, marking a PR ready (when checks are green and the description is complete), and pushing this session's own commits on a branch that has an open PR. Also pruning everything the survey marks `AUTO-PRUNE`, and running the `AUTO` and `LAST` commands the survey prints for this session's worktree (step 3), and saving `reference`/`discovery` gotchas to auto-memory when they pass the step-4 filter. Show what you did right after; don't ask first. The answer to "should I post this?" / "should I prune this merged branch?" is always yes; stop asking.
 - **Destructive, cross-system or knowledge-placing actions: show the exact plan and get a yes first.** Merge, force-push, delete any branch/worktree the survey doesn't mark `AUTO-PRUNE`, delete temp files, write `feedback` memories, place gotchas in repo files, or delete memories (step 4). Drafting and proposing is free; executing these is not.
 
 **Sequencing:** the handover (step 5) is the last thing you output, once, after every step above is finished and every question to the user is answered. It is a snapshot of the completed state, not of the plan.
@@ -22,7 +22,7 @@ Gather facts before touching anything. **Cover every repo this session touched**
 python3 <skill-dir>/scripts/survey.py <repo> [<repo> …]
 ```
 
-It is read-only apart from `git fetch --prune`, and prints the session id, transcript path and session kind, then per repo: every local branch and worktree classified `AUTO-PRUNE` / `ASK` / `KEEP` with the reason, commits on no remote, open PRs, and whether the worktree this session runs in can be closed. Don't re-run its git/gh checks by hand; read them from its output. Remote hosts and non-git state (a running migration, a deployed service) still need their own look.
+It is read-only apart from `git fetch --prune`, and prints the session id, transcript path and session kind, then per repo: every local branch and worktree classified `AUTO-PRUNE` / `ASK` / `KEEP` with the reason, commits on no remote, open PRs, and whether the worktree this session runs in can be closed. Don't re-run its git/gh checks by hand; read them from its output. Read the whole output: never pipe it through `head`, `tail`, `cut` or similar, because the lines about this session's worktree come last. Remote hosts and non-git state (a running migration, a deployed service) still need their own look.
 
 Note what changed this session (commits, modified files, tickets, remote hosts touched). Use this to pick which steps below apply.
 
@@ -66,9 +66,15 @@ git push origin --delete <branch>   # only if the remote branch still exists aft
 
 **Ask bucket**: everything marked `ASK`, plus temp files created this session (scratch files, `.bak`, debug logs, leftover test artifacts; the script can't see their provenance). Present one list, confirm, then act.
 
-**Guard**: `KEEP` means keep: an open PR's branch, worktree and WIP; the default branch; this session's worktree. Never delete commits on no remote. Never `git branch -D` a branch the survey didn't mark `AUTO-PRUNE`.
+**Guard**: `KEEP` means keep: an open PR's branch, worktree and WIP; the default branch; this session's worktree; a worktree locked by a running session. Never delete commits on no remote. Never `git branch -D` a branch the survey didn't mark `AUTO-PRUNE`, except the one in this worktree's `AUTO` commands.
 
-**This session's worktree**: the survey's `THIS WORKTREE` line says "closable with ctrl+x" or names what blocks it. If a blocker shows up, or the survey lists worktrees with submodules, read `references/worktrees.md` from this skill's directory before acting. Report the result as one line.
+**This session's worktree**: the goal is that one ctrl+x in Agent View closes the session. The survey's `THIS WORKTREE` line gives the verdict, and the indented lines under it say what's left:
+
+- `AUTO` (the branch's PR is merged as-is, its pre-squash commits are on no remote): run the printed commands now, without asking. They detach the worktree to the default branch and delete the merged branch; nothing is lost, the content is in the default branch. Otherwise Agent View refuses with "N unpushed commits".
+- `LAST` (Claude Code's lock on this worktree, background sessions only): run the printed `git worktree unlock` as your last tool call, after every other step and right before the handover. Otherwise Agent View can refuse with "worktree holds a Claude Code lock for a running process".
+- `BLOCKER`: needs a decision. Treat it as unsaved work above (ask tier), or see `references/worktrees.md`.
+
+Run each printed command as its own Bash call, exactly as printed. If a blocker shows up, or the survey lists worktrees with submodules, read `references/worktrees.md` from this skill's directory before acting. Report the result as one line.
 
 Report auto-pruned items as one short list (branch, PR `#<n> – <title>`, what was removed).
 
@@ -111,7 +117,7 @@ In the handover, durable gotchas appear only as a pointer to where they now live
 
 ## 5. Handover note
 
-**Gate:** only once steps 0–4 are complete and nothing is waiting on the user.
+**Gate:** only once steps 0–4 are complete, nothing is waiting on the user, and the `LAST` command from step 3 (if any) ran.
 
 Print **one** fenced markdown block in the chat (not a file) that the user pastes as the *entire* first prompt of the next session. The next session re-checks live state first anyway, so the note carries **pointers, not status prose**: IDs, paths, hosts, and the commands that reveal current state. Don't restate what a PR, commit, ticket or Linear update already says; point to it. Target ≤ 2.5k characters; Pointers is where notes grow, so one line per item, no explanations there.
 
@@ -122,7 +128,7 @@ Rules:
 - What this session finished shows up as its PRs/commits under Pointers; there is no separate Done section.
 - No status adjectives that go stale (draft/ready/green) except where they drive a decision.
 - Drop any section that's empty.
-- Background session: one Gotchas line on closing it, from step 3, only when it isn't a plain ctrl+x (e.g. "ctrl+x twice: discards the pre-squash commits of #<n> – <title>").
+- Background session: one Gotchas line on closing it, from step 3, only when a `BLOCKER` is left and the user decided to keep it (e.g. "ctrl+x twice: discards the uncommitted scratch files in <path>").
 - **Open decisions** holds only what the user alone can settle: a product call with no default, access or credentials, something irreversible. Anything with a clear default goes under Next steps as `Default: <what>`; a listed decision makes the next session wait for an answer it does not need.
 - Work that runs under a skill names it as the first Pointer; the skill's rules on when to ask apply on top of the working-mode line.
 

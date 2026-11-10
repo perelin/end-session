@@ -38,10 +38,10 @@ Then say "end session" (or "wrap up", "hand over") at the end of a session, or i
 
 The skill sorts actions into two tiers:
 
-- **Done without asking, reported afterwards**: posting a project update, moving a ticket, marking a PR ready when checks are green, pushing the session's own commits to a branch with an open PR, deleting a branch/worktree the survey marks `AUTO-PRUNE`, writing technical gotchas to auto-memory.
+- **Done without asking, reported afterwards**: posting a project update, moving a ticket, marking a PR ready when checks are green, pushing the session's own commits to a branch with an open PR, deleting a branch/worktree the survey marks `AUTO-PRUNE`, making the session's own worktree closable with one ctrl+x (detaching it from its squash-merged branch, and removing Claude Code's worktree lock as the last step), writing technical gotchas to auto-memory.
 - **Shown first, done only after a yes**: merging, force-pushing, deleting anything else, deleting temp files, writing to repo files, writing or deleting memories about how you work.
 
-`AUTO-PRUNE` requires all of: the branch's PR is merged, the local tip equals the merged head, the worktree is clean and isn't the main checkout or the current session's, and no submodule holds commits that exist on no remote.
+`AUTO-PRUNE` requires all of: the branch's PR is merged, the local tip equals the merged head, the worktree is clean, isn't locked, and isn't the main checkout or the current session's, and no submodule holds commits that exist on no remote.
 
 ## The handover
 
@@ -72,6 +72,17 @@ KEEP       main: default branch
 KEEP       feature-x: open PR #44 – Add export
 OPEN PR    #44 – Add export (draft) — https://github.com/…/pull/44
 THIS WORKTREE ~/code/app/.claude/worktrees/feature-x: closable with ctrl+x
+```
+
+When the session's own branch was squash-merged, or (in a background session) Claude Code's lock is on its worktree, the verdict reads `closable with ctrl+x once the commands below ran` and lists them:
+
+```
+THIS WORKTREE ~/code/app/.claude/worktrees/fix-login: closable with ctrl+x once the commands below ran
+  AUTO     commits on no remote, content merged via #41 – Fix login redirect
+    $ git -C ~/code/app/.claude/worktrees/fix-login switch --detach origin/main
+    $ git -C ~/code/app/.claude/worktrees/fix-login branch -D fix-login
+  LAST     Claude Code lock on this worktree
+    $ git -C ~/code/app/.claude/worktrees/fix-login worktree unlock ~/code/app/.claude/worktrees/fix-login
 ```
 
 ## Tests
