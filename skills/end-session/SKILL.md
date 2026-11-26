@@ -1,5 +1,6 @@
 ---
 name: end-session
+user-invocable: true
 description: End a coding session cleanly. Use at the end of a work session or when the user says "end session", "end the session", "finish up", "close out", or "hand over". Checks PR readiness, updates project tracking and tickets (e.g. Linear project updates), prunes stale branches/worktrees/temp files while keeping anything tied to an open PR, persists recurring gotchas where they belong instead of carrying them in handovers, then prints a pointer-based, copy-pasteable handover note for the next session.
 ---
 
